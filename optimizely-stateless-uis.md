@@ -95,7 +95,8 @@ How did it live up to our checklist of requirements:
 2.  Decoupling of business logic and UI views - VueJS is only concerned with UI components and doesn't really have any opinions about data fetching and syncing, allowing us to 
 implement our business logic in "services".
 
-3.  No need for legacy browser support - VueJS is takes full advantage of ES5 getters / setters to provide a much simpler API.  Contrast that to KnockoutJS
+3.  No need for legacy browser support - VueJS is takes full advantage of ES5 getters / setters to provide a much simpler API.  Contrast that to KnockoutJS's need to convert every
+observable to a function.
 
 **The Very First Component: Navbar**
 
@@ -310,10 +311,151 @@ And in **ExperimentTableRowComponent**
 }
 ```
 
-This becomes a lot of boilerplate very quickly, as well as not having good conventions around the pub / sub.  However, the biggest shortcoming to this approach was
-the unpredictability and difficulty to easily understand the data flow.  There is no single place that enumerates which components broadcast what and which components
-are listening to these events.  This problem is magnified because of the two-way communication that is occuring here, which is not ideal for a pub/sub system.
-
 ![component event passing](./img/component-events.jpg)
 
+#### There are several issues with this solution:
+
+1.  There is no global source of truth in the model.  The only it gaurantees is that when an entity is updated it the update will be broadcasted.  What if a component
+is instantiated right after one of these dispatches?  It has no frontend source of truth to get the canonical value.
+
+2.  Hard to predict, what if a component causes another dispatch when listening for an event.  A cascading effect of events and side-effects will ensue.
+
+3.  Not scalable - using events for two way communication between components wasn't scaling.  So much is based on the discipline of the developer to create good conventions
+around event names and payloads, which is very difficult in a codebase with dozens of people working on it.
+
 ## The Solution: Flux To The Rescue!
+
+By using a Flux system to store all of our application state we get the best of all worlds:
+
+1.  Data and state decoupled from the UI
+
+2.  Any component can subscribe to any piece of state (component heirarchy and position does not mattter)
+
+3.  Components always stay in sync and become stateless
+
+4.  Extremely predictable 1-way data flow
+
+Lets go back to our problem at hand and see how flux solves it.
+
+![flux solution](./img/flux-solution.jpg)
+
+#### So whats different about this solution?
+
+1.  ActionCreators are decoupled from the UI and are the semantic way to perform a state change on the system.  ActionCreators can very easily be used programmatically, meaning
+it is trivial to put the system in any state in the same manner as a user interacting with the web app.  This is amazing for testability, allowing us to completely unit test our
+UI logic without bootstrapping the UI and DOM.
+
+2.  Stores provide a frontend source of truth.  At any point in time a component can synchronously request the state from a store as well as easily observe that state over time.
+
+3.  Referential safety - in our implementation of Flux components never directly reference objects in stores, meaning they are free to make local changes and to apply them
+they simply dispatch a save action through the Flux system.
+
+4.  Predictable - the combination of one-way data flow, non-cascading dispatches, and a singleton dispatcher give great predictability and visibility into the system.  In fact
+during development we log every action dispatched on the system and the entire app state before and after the action.  This gives us a level of visibility into our application
+that was previously unimaginable.
+
+## Flux In Depth
+
+#### Stores
+
+```js
+var flux = require('flux');
+var storeFactory = require('flux/factories/store_factory');
+var actionTypes = require('flux/constants/action_types');
+
+module.exports = storeFactory.create({
+  initialize: function() {
+    this.tableFilters = {
+      experiments: {}
+    };
+
+    this.bindActions(
+      actionTypes.DASHBOARD_SET_TABLE_FILTERS, this.__setFilters
+    );
+  },
+
+  getFilters: function(category) {
+    return this.tableFilters[category];
+  },
+
+  __setFilters: function(payload) {
+    var category = payload.category;
+    var newFilters = payload.filters;
+    var currentFilters = this.tableFilters[category];
+
+    if (!_.isEqual(currentFilters, newFilters)) {
+      this.tableFilters[category] = newFilters;
+      this.emitChange();
+    }
+  },
+})
+```
+
+#### ActionCreators
+
+```js
+var flux = require('flux');
+var actionTypes = require('flux/constants/action_types');
+
+flux.dispatch(actionTypes.DASHBOARD_SET_TABLE_FILTERS, {
+  category: 'experiments',
+  filters: {
+    string: 'optimizely',
+  }
+});
+```
+
+#### Getters
+
+- Functional transformation and composition of data in one or many stores
+- This is how inter-store dependent data is resolved
+- No dispatcher.waitFor(store)
+
+```js
+/**
+ * Function getter to take currentProject + experiments store
+ * and return all experiments for that project
+ */
+module.exports = [
+  'currentProject',
+  'experiments',
+  function (currentProjectStore, experimentStore) {
+    var currentProjectId = currentProjectStore.getId()
+    if (currentProjectId) {
+      return experimentStore.getAll({
+        project_id: currentProjectId
+      });
+    } else {
+      return [];
+    }
+  }
+];
+```
+
+And they can be composed...
+```js
+var getCurrentProjectExperiments = require('flux/getters/current_project/experiments');
+
+module.exports = [
+  getCurrentProjectExperiments,
+  'dashboard/tableFilters',
+  function (experiments, filterStore) {
+    var filters = filterStore.getFilters('experiments');
+    var filterString = filters.string;
+
+    if (filterString) {
+      filterString = filterString.toLowerCase();
+      return experiments.filter(function(exp) {
+        var title = exp.description.toLowerCase();
+        return _.contains(title, filterString);
+      });
+    }
+
+    return experiments;
+  }
+];
+```
+
+## Conclusion
+
+// todo
